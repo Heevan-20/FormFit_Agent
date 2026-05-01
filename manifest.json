@@ -1,0 +1,23 @@
+{
+    "manifest_version": 3,
+    "name": "FormFit Agent",
+    "version": "1.0",
+    "description": "Auto processes the uploaded files",
+
+    "permissions": ["scripting"],
+
+    "content_scripts": [
+        {
+            "matches": ["<all_urls>"],
+            "js": ["content.js"],
+            "run_at": "document_end"
+        }
+    ],
+
+    "web_accessible_resources": [
+        {
+            "resources": ["DomAnalyzer.js", "FileProcessor.js", "DomInject.js"],
+            "matches": ["<all_urls>"]
+        }
+    ]
+}
