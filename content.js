@@ -41,18 +41,27 @@ async function init() {
         const processedResults = [];
 
         for (const input of finalInputs) {
-            const result = await processFile(input);
+            try {
+                console.log("Processing input:", input.inputId);
+                const result = await processFile(input);
 
-            if (!result) continue;
+                if (!result) continue;
 
-            const injection = injectProcessedFile(input, result);
-            result.injection = injection;
-            result.wiredToInput = injection.wiredToInput;
-            result.processedConstraints = injection.processedConstraints;
+                console.log("Calling DomInject for:", input.inputId);
+                const injection = injectProcessedFile(input, result);
+                result.injection = injection;
+                result.wiredToInput = injection.wiredToInput;
+                result.processedConstraints = injection.processedConstraints;
 
-            processedResults.push(result);
+                processedResults.push(result);
 
-            console.log("Processed file constraints:", result.processedConstraints);
+                console.log("Processed file constraints:", result.processedConstraints);
+            } catch (err) {
+                console.error("Processing/injection failed for input:", {
+                    inputId: input.inputId,
+                    error: err
+                });
+            }
         }
 
         updateFormFitGlobals(processedResults);

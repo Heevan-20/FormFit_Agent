@@ -31,6 +31,7 @@ export function injectProcessedFile(parsedInput, processResult) {
         );
 
         console.log("DomInject result:", injection);
+        console.log("DomInject file changes:", buildFileChangeSummary(processResult, injection));
         postProcessedFile(injection, processedFile);
 
         return injection;
@@ -137,6 +138,42 @@ function buildInjectionResult(parsedInput, processResult, processedFile, wired, 
                 : null
         },
         error
+    };
+}
+
+function buildFileChangeSummary(processResult, injection) {
+    const original = processResult?.original || {};
+    const processed = processResult?.processed || {};
+
+    return {
+        inputId: injection.inputId,
+        uploadedSuccessfully: injection.wiredToInput,
+        name: {
+            before: original.name || "",
+            after: processed.name || injection.processedConstraints.fileName || "",
+            changed: Boolean(original.name && processed.name && original.name !== processed.name)
+        },
+        type: {
+            before: original.type || "",
+            after: processed.type || injection.processedConstraints.fileType || "",
+            changed: Boolean(original.type && processed.type && original.type !== processed.type)
+        },
+        sizeKB: {
+            before: original.sizeKB || "",
+            after: processed.sizeKB || injection.processedConstraints.sizeKB || "",
+            changed: Boolean(original.sizeKB && processed.sizeKB && original.sizeKB !== processed.sizeKB)
+        },
+        width: {
+            before: original.width || "",
+            after: processed.width || injection.processedConstraints.width || "",
+            changed: Boolean(original.width && processed.width && original.width !== processed.width)
+        },
+        height: {
+            before: original.height || "",
+            after: processed.height || injection.processedConstraints.height || "",
+            changed: Boolean(original.height && processed.height && original.height !== processed.height)
+        },
+        required: processResult?.required || {}
     };
 }
 

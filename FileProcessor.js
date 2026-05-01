@@ -17,8 +17,16 @@ export async function processFile(parsedInput) {
         return null;
     }
 
+    console.log("FileProcessor started:", {
+        inputId: parsedInput.inputId,
+        fileName: file.name,
+        fileType: file.type,
+        fileSizeKB: (file.size / 1024).toFixed(2),
+        constraints
+    });
+
     if (!file.type.startsWith("image/")) {
-        console.log("Non-image file → skipping:", file.name);
+        console.log("Non-image file -> skipping image processing:", file.name);
         return buildPassthroughResult(file, parsedInput);
     }
 
@@ -29,90 +37,48 @@ export async function processFile(parsedInput) {
     const targetFormat = getTargetFormat(constraints.validFormats);
     const maxSizeKB = parseSize(constraints.maxSize);
 
-    // ================================
-    // DECISION ENGINE
-    // ================================
-    const decision = needsProcessing(file, img, {
+    const targets = {
         targetWidth,
         targetHeight,
         targetFormat,
         maxSizeKB
-    });
+    };
 
+    console.log("FileProcessor targets:", targets);
+
+    const decision = needsProcessing(file, img, targets);
     console.log("Processing decision:", decision);
 
-    // ================================
-    // EARLY EXIT (BEST CASE)
-    // ================================
     if (!decision.required) {
-        console.log("No processing needed → returning original");
-
-        return buildResult(file, file, parsedInput, img, targetFormat);
+        console.log("No processing needed -> returning original");
+        return buildResult(file, file, parsedInput, img, targetFormat, img.width, img.height);
     }
-
-    // ================================
-    // FORMAT ONLY
-    // ================================
-    if (
-        decision.formatMismatch &&
-        !decision.sizeMismatch &&
-        !decision.widthMismatch &&
-        !decision.heightMismatch
-    ) {
-        console.log("Only format change needed");
-
-        const canvas = createCanvas(img.width, img.height);
-        canvas.ctx.drawImage(img, 0, 0);
-
-        const blob = await canvasToBlob(canvas.el, targetFormat, 0.95);
-
-        return buildResult(file, blob, parsedInput, img, targetFormat);
-    }
-
-    // ================================
-    // SIZE ONLY (compress, no resize)
-    // ================================
-    if (
-        decision.sizeMismatch &&
-        !decision.widthMismatch &&
-        !decision.heightMismatch
-    ) {
-        console.log("Only size compression needed");
-
-        const canvas = createCanvas(img.width, img.height);
-        canvas.ctx.drawImage(img, 0, 0);
-
-        let quality = 0.9;
-        let blob = await canvasToBlob(canvas.el, targetFormat, quality);
-
-        while (blob.size / 1024 > maxSizeKB && quality > 0.1) {
-            quality -= 0.1;
-            blob = await canvasToBlob(canvas.el, targetFormat, quality);
-        }
-
-        return buildResult(file, blob, parsedInput, img, targetFormat);
-    }
-
-    // ================================
-    // RESIZE (or combined case)
-    // ================================
-    console.log("Resize / combined processing");
 
     const finalWidth = targetWidth || img.width;
     const finalHeight = targetHeight || img.height;
 
+    console.log("Rendering processed image:", {
+        originalWidth: img.width,
+        originalHeight: img.height,
+        finalWidth,
+        finalHeight,
+        targetFormat,
+        maxSizeKB
+    });
+
     const canvas = createCanvas(finalWidth, finalHeight);
     canvas.ctx.drawImage(img, 0, 0, finalWidth, finalHeight);
 
-    let quality = 0.9;
-    let blob = await canvasToBlob(canvas.el, targetFormat, quality);
+    const blob = await compressCanvas(canvas.el, targetFormat, maxSizeKB);
 
-    while (blob.size / 1024 > maxSizeKB && quality > 0.1) {
-        quality -= 0.1;
-        blob = await canvasToBlob(canvas.el, targetFormat, quality);
-    }
+    console.log("FileProcessor finished blob:", {
+        type: blob.type,
+        sizeKB: (blob.size / 1024).toFixed(2),
+        width: finalWidth,
+        height: finalHeight
+    });
 
-    return buildResult(file, blob, parsedInput, img, targetFormat);
+    return buildResult(file, blob, parsedInput, img, targetFormat, finalWidth, finalHeight);
 }
 
 // ================================
@@ -120,7 +86,7 @@ export async function processFile(parsedInput) {
 // ================================
 function needsProcessing(file, img, targets) {
     const currentSizeKB = file.size / 1024;
-    const currentFormat = file.type.split("/")[1]?.toUpperCase();
+    const currentFormat = normalizeFormat(file.type.split("/")[1]);
 
     const widthMismatch = !!(targets.targetWidth && img.width !== targets.targetWidth);
     const heightMismatch = !!(targets.targetHeight && img.height !== targets.targetHeight);
@@ -144,32 +110,32 @@ function loadImage(file) {
         const img = new Image();
         const url = URL.createObjectURL(file);
         let resolved = false;
-        
+
         img.onload = () => {
-            if (!resolved) {
-                resolved = true;
-                URL.revokeObjectURL(url);
-                resolve(img);
-            }
+            if (resolved) return;
+            resolved = true;
+            URL.revokeObjectURL(url);
+            console.log("Image loaded for processing:", {
+                width: img.naturalWidth || img.width,
+                height: img.naturalHeight || img.height
+            });
+            resolve(img);
         };
-        
-        img.onerror = (err) => {
-            if (!resolved) {
-                resolved = true;
-                URL.revokeObjectURL(url);
-                reject(err || new Error("Failed to load image"));
-            }
+
+        img.onerror = () => {
+            if (resolved) return;
+            resolved = true;
+            URL.revokeObjectURL(url);
+            reject(new Error("Failed to load image"));
         };
-        
+
         img.src = url;
-        
-        // Timeout fallback
+
         setTimeout(() => {
-            if (!resolved) {
-                resolved = true;
-                URL.revokeObjectURL(url);
-                reject(new Error("Image loading timeout after 10 seconds"));
-            }
+            if (resolved) return;
+            resolved = true;
+            URL.revokeObjectURL(url);
+            reject(new Error("Image loading timeout after 10 seconds"));
         }, 10000);
     });
 }
@@ -178,16 +144,60 @@ function createCanvas(w, h) {
     const el = document.createElement("canvas");
     el.width = w;
     el.height = h;
+
     const ctx = el.getContext("2d");
     if (!ctx) throw new Error("Could not get canvas context");
+
     return { el, ctx };
 }
 
+async function compressCanvas(canvas, format, maxSizeKB) {
+    let quality = 0.92;
+    let bestBlob = null;
+    const maxAttempts = format === "PNG" ? 1 : 10;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const blob = await canvasToBlob(canvas, format, quality);
+        bestBlob = blob;
+
+        const sizeKB = blob.size / 1024;
+        console.log("Compression attempt:", {
+            attempt,
+            format,
+            quality: Number(quality.toFixed(2)),
+            sizeKB: sizeKB.toFixed(2),
+            maxSizeKB
+        });
+
+        if (maxSizeKB === Infinity || sizeKB <= maxSizeKB) {
+            return blob;
+        }
+
+        quality = Math.max(0.1, quality - 0.1);
+    }
+
+    console.log("Could not reach target size; using smallest generated file:", {
+        sizeKB: bestBlob ? (bestBlob.size / 1024).toFixed(2) : "",
+        maxSizeKB
+    });
+
+    return bestBlob;
+}
+
 function canvasToBlob(canvas, format, quality) {
-    return new Promise((resolve) => {
+    const mimeType = `image/${format.toLowerCase()}`;
+
+    return new Promise((resolve, reject) => {
         canvas.toBlob(
-            (blob) => resolve(blob),
-            `image/${format.toLowerCase()}`,
+            (blob) => {
+                if (!blob) {
+                    reject(new Error(`Canvas failed to create blob for ${mimeType}`));
+                    return;
+                }
+
+                resolve(blob);
+            },
+            mimeType,
             quality
         );
     });
@@ -196,7 +206,7 @@ function canvasToBlob(canvas, format, quality) {
 function parseSize(sizeStr) {
     if (!sizeStr) return Infinity;
 
-    const match = sizeStr.match(/(\d+(?:\.\d+)?)(KB|MB)/i);
+    const match = String(sizeStr).match(/(\d+(?:\.\d+)?)(KB|MB)/i);
     if (!match) return Infinity;
 
     const value = Number(match[1]);
@@ -206,24 +216,37 @@ function parseSize(sizeStr) {
 }
 
 function getTargetFormat(validFormats) {
-    if (!validFormats || validFormats.length === 0) return "JPEG";
+    if (!Array.isArray(validFormats) || validFormats.length === 0) return "JPEG";
 
-    if (validFormats.includes("JPEG")) return "JPEG";
-    if (validFormats.includes("JPG")) return "JPEG";
-    if (validFormats.includes("PNG")) return "PNG";
+    const formats = validFormats.map(normalizeFormat).filter(Boolean);
 
-    return validFormats[0];
+    if (formats.includes("JPEG")) return "JPEG";
+    if (formats.includes("PNG")) return "PNG";
+    if (formats.includes("WEBP")) return "WEBP";
+
+    return "JPEG";
+}
+
+function normalizeFormat(format) {
+    if (!format) return "";
+
+    const upper = String(format).toUpperCase();
+    if (upper === "JPG") return "JPEG";
+    if (upper === "ANY") return "";
+
+    return upper;
 }
 
 function changeExtension(fileName, newFormat) {
+    const extension = newFormat === "JPEG" ? "jpg" : newFormat.toLowerCase();
     const base = fileName.split(".").slice(0, -1).join(".") || fileName;
-    return `${base}.${newFormat.toLowerCase()}`;
+    return `${base}.${extension}`;
 }
 
 // ================================
 // RESULT BUILDER
 // ================================
-function buildResult(originalFile, blobOrFile, parsedInput, img, format) {
+function buildResult(originalFile, blobOrFile, parsedInput, img, format, processedWidth, processedHeight) {
     const processedFile =
         blobOrFile instanceof File
             ? blobOrFile
@@ -252,8 +275,8 @@ function buildResult(originalFile, blobOrFile, parsedInput, img, format) {
             name: processedFile.name,
             sizeKB: (processedFile.size / 1024).toFixed(2),
             type: processedFile.type,
-            width: processedFile === originalFile ? img.width : (Number(parsedInput.constraints.width) || img.width),
-            height: processedFile === originalFile ? img.height : (Number(parsedInput.constraints.height) || img.height)
+            width: processedWidth,
+            height: processedHeight
         }
     };
 
